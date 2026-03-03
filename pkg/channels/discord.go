@@ -14,23 +14,20 @@ import (
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/utils"
-	"github.com/sipeed/picoclaw/pkg/voice"
 )
 
 const (
-	transcriptionTimeout = 30 * time.Second
-	sendTimeout          = 10 * time.Second
+	sendTimeout = 10 * time.Second
 )
 
 type DiscordChannel struct {
 	*BaseChannel
-	session     *discordgo.Session
-	config      config.DiscordConfig
-	transcriber voice.Transcriber
-	ctx         context.Context
-	typingMu    sync.Mutex
-	typingStop  map[string]chan struct{} // chatID → stop signal
-	botUserID   string                   // stored for mention checking
+	session    *discordgo.Session
+	config     config.DiscordConfig
+	ctx        context.Context
+	typingMu   sync.Mutex
+	typingStop map[string]chan struct{} // chatID → stop signal
+	botUserID  string                   // stored for mention checking
 }
 
 func NewDiscordChannel(cfg config.DiscordConfig, bus *bus.MessageBus) (*DiscordChannel, error) {
@@ -45,14 +42,9 @@ func NewDiscordChannel(cfg config.DiscordConfig, bus *bus.MessageBus) (*DiscordC
 		BaseChannel: base,
 		session:     session,
 		config:      cfg,
-		transcriber: nil,
 		ctx:         context.Background(),
 		typingStop:  make(map[string]chan struct{}),
 	}, nil
-}
-
-func (c *DiscordChannel) SetTranscriber(transcriber voice.Transcriber) {
-	c.transcriber = transcriber
 }
 
 func (c *DiscordChannel) getContext() context.Context {
@@ -233,26 +225,7 @@ func (c *DiscordChannel) handleMessage(s *discordgo.Session, m *discordgo.Messag
 			if localPath != "" {
 				localFiles = append(localFiles, localPath)
 
-				var transcribedText string
-				if c.transcriber != nil && c.transcriber.IsAvailable() {
-					ctx, cancel := context.WithTimeout(c.getContext(), transcriptionTimeout)
-					result, err := c.transcriber.Transcribe(ctx, localPath)
-					cancel() // Release context resources immediately to avoid leaks in for loop
-
-					if err != nil {
-						logger.ErrorCF("discord", "Voice transcription failed", map[string]any{
-							"error": err.Error(),
-						})
-						transcribedText = fmt.Sprintf("[audio: %s (transcription failed)]", attachment.Filename)
-					} else {
-						transcribedText = fmt.Sprintf("[audio transcription: %s]", result.Text)
-						logger.DebugCF("discord", "Audio transcribed successfully", map[string]any{
-							"text": result.Text,
-						})
-					}
-				} else {
-					transcribedText = fmt.Sprintf("[audio: %s]", attachment.Filename)
-				}
+				transcribedText := fmt.Sprintf("[audio: %s]", attachment.Filename)
 
 				content = appendContent(content, transcribedText)
 			} else {

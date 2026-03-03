@@ -6,7 +6,6 @@ import (
 	"os"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/slack-go/slack"
 	"github.com/slack-go/slack/slackevents"
@@ -16,7 +15,6 @@ import (
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/utils"
-	"github.com/sipeed/picoclaw/pkg/voice"
 )
 
 type SlackChannel struct {
@@ -26,7 +24,6 @@ type SlackChannel struct {
 	socketClient *socketmode.Client
 	botUserID    string
 	teamID       string
-	transcriber  voice.Transcriber
 	ctx          context.Context
 	cancel       context.CancelFunc
 	pendingAcks  sync.Map
@@ -57,10 +54,6 @@ func NewSlackChannel(cfg config.SlackConfig, messageBus *bus.MessageBus) (*Slack
 		api:          api,
 		socketClient: socketClient,
 	}, nil
-}
-
-func (c *SlackChannel) SetTranscriber(transcriber voice.Transcriber) {
-	c.transcriber = transcriber
 }
 
 func (c *SlackChannel) Start(ctx context.Context) error {
@@ -255,20 +248,7 @@ func (c *SlackChannel) handleMessageEvent(ev *slackevents.MessageEvent) {
 			localFiles = append(localFiles, localPath)
 			mediaPaths = append(mediaPaths, localPath)
 
-			if utils.IsAudioFile(file.Name, file.Mimetype) && c.transcriber != nil && c.transcriber.IsAvailable() {
-				ctx, cancel := context.WithTimeout(c.ctx, 30*time.Second)
-				defer cancel()
-				result, err := c.transcriber.Transcribe(ctx, localPath)
-
-				if err != nil {
-					logger.ErrorCF("slack", "Voice transcription failed", map[string]any{"error": err.Error()})
-					content += fmt.Sprintf("\n[audio: %s (transcription failed)]", file.Name)
-				} else {
-					content += fmt.Sprintf("\n[voice transcription: %s]", result.Text)
-				}
-			} else {
-				content += fmt.Sprintf("\n[file: %s]", file.Name)
-			}
+			content += fmt.Sprintf("\n[file: %s]", file.Name)
 		}
 	}
 

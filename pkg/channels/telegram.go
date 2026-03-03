@@ -20,7 +20,6 @@ import (
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/utils"
-	"github.com/sipeed/picoclaw/pkg/voice"
 )
 
 var (
@@ -43,7 +42,6 @@ type TelegramChannel struct {
 	config        *config.Config
 	configPath    string
 	chatIDs       map[string]int64
-	transcriber   voice.Transcriber
 	placeholders  sync.Map // chatID -> messageID
 	stopThinking  sync.Map // chatID -> thinkingCancel
 	modelSwitcher ModelSwitcher
@@ -96,15 +94,10 @@ func NewTelegramChannel(cfg *config.Config, bus *bus.MessageBus, configPath stri
 		config:        cfg,
 		configPath:    configPath,
 		chatIDs:       make(map[string]int64),
-		transcriber:   nil,
 		placeholders:  sync.Map{},
 		stopThinking:  sync.Map{},
 		modelSwitcher: switcher,
 	}, nil
-}
-
-func (c *TelegramChannel) SetTranscriber(transcriber voice.Transcriber) {
-	c.transcriber = transcriber
 }
 
 func (c *TelegramChannel) Start(ctx context.Context) error {
@@ -242,15 +235,15 @@ func (c *TelegramChannel) handleMessage(ctx context.Context, message *telego.Mes
 
 	// DEBUG: Log message details
 	logger.InfoCF("telegram", "DEBUG: Message received", map[string]any{
-		"sender_id": senderID,
-		"chat_id": chatID,
-		"chat_type": message.Chat.Type,
-		"message_id": message.MessageID,
-		"text": message.Text,
-		"caption": message.Caption,
-		"has_photo": len(message.Photo) > 0,
-		"has_voice": message.Voice != nil,
-		"has_audio": message.Audio != nil,
+		"sender_id":    senderID,
+		"chat_id":      chatID,
+		"chat_type":    message.Chat.Type,
+		"message_id":   message.MessageID,
+		"text":         message.Text,
+		"caption":      message.Caption,
+		"has_photo":    len(message.Photo) > 0,
+		"has_voice":    message.Voice != nil,
+		"has_audio":    message.Audio != nil,
 		"has_document": message.Document != nil,
 	})
 
@@ -310,44 +303,10 @@ func (c *TelegramChannel) handleMessage(ctx context.Context, message *telego.Mes
 			localFiles = append(localFiles, voicePath)
 			mediaPaths = append(mediaPaths, voicePath)
 
-			var transcribedText string
-			transcriptionSuccess := false
-			if c.transcriber != nil && c.transcriber.IsAvailable() {
-				transcriberCtx, cancel := context.WithTimeout(ctx, 120*time.Second)
-				defer cancel()
-
-				result, err := c.transcriber.Transcribe(transcriberCtx, voicePath)
-				if err != nil {
-					logger.ErrorCF("telegram", "Voice transcription failed", map[string]any{
-						"error": err.Error(),
-						"path":  voicePath,
-					})
-					transcribedText = "[voice (transcription failed)]"
-					// Keep the file for debugging - remove from localFiles
-					for i, f := range localFiles {
-						if f == voicePath {
-							localFiles = append(localFiles[:i], localFiles[i+1:]...)
-							break
-						}
-					}
-					logger.InfoCF("telegram", "Kept failed audio file for debugging", map[string]any{"path": voicePath})
-				} else {
-					transcribedText = fmt.Sprintf("[voice transcription: %s]", result.Text)
-					transcriptionSuccess = true
-					logger.InfoCF("telegram", "Voice transcribed successfully", map[string]any{
-						"text": result.Text,
-					})
-				}
-			} else {
-				transcribedText = "[voice]"
-			}
-
-			_ = transcriptionSuccess // suppress unused variable warning
-
 			if content != "" {
 				content += "\n"
 			}
-			content += transcribedText
+			content += "[voice]"
 		}
 	}
 
@@ -380,10 +339,10 @@ func (c *TelegramChannel) handleMessage(ctx context.Context, message *telego.Mes
 	}
 
 	logger.DebugCF("telegram", "Received message", map[string]any{
-		"sender_id":   senderID,
-		"chat_id":     fmt.Sprintf("%d", chatID),
-		"chat_type":   message.Chat.Type,
-		"preview":     utils.Truncate(content, 50),
+		"sender_id":    senderID,
+		"chat_id":      fmt.Sprintf("%d", chatID),
+		"chat_type":    message.Chat.Type,
+		"preview":      utils.Truncate(content, 50),
 		"bot_username": c.bot.Username(),
 	})
 
