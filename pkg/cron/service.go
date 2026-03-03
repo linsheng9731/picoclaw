@@ -146,7 +146,18 @@ func (cs *CronService) checkJobs() {
 	// Collect jobs that are due (we need to copy them to execute outside lock)
 	for i := range cs.store.Jobs {
 		job := &cs.store.Jobs[i]
-		if job.Enabled && job.State.NextRunAtMS != nil && *job.State.NextRunAtMS <= now {
+		if !job.Enabled {
+			continue
+		}
+
+		// Fix: if NextRunAtMS is nil but job is enabled, recompute it
+		// This handles cases where the job was interrupted or missed
+		if job.State.NextRunAtMS == nil {
+			job.State.NextRunAtMS = cs.computeNextRun(&job.Schedule, now)
+			continue
+		}
+
+		if *job.State.NextRunAtMS <= now {
 			dueJobIDs = append(dueJobIDs, job.ID)
 		}
 	}
@@ -284,7 +295,10 @@ func (cs *CronService) recomputeNextRuns() {
 	for i := range cs.store.Jobs {
 		job := &cs.store.Jobs[i]
 		if job.Enabled {
-			job.State.NextRunAtMS = cs.computeNextRun(&job.Schedule, now)
+			// Recompute if next run is not set OR if it's in the past (missed execution)
+			if job.State.NextRunAtMS == nil || *job.State.NextRunAtMS <= now {
+				job.State.NextRunAtMS = cs.computeNextRun(&job.Schedule, now)
+			}
 		}
 	}
 }

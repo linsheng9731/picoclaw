@@ -21,7 +21,9 @@ type Manager struct {
 	channels     map[string]Channel
 	bus          *bus.MessageBus
 	config       *config.Config
+	configPath   string
 	dispatchTask *asyncTask
+	modelSwitcher ModelSwitcher
 	mu           sync.RWMutex
 }
 
@@ -29,11 +31,13 @@ type asyncTask struct {
 	cancel context.CancelFunc
 }
 
-func NewManager(cfg *config.Config, messageBus *bus.MessageBus) (*Manager, error) {
+func NewManager(cfg *config.Config, messageBus *bus.MessageBus, configPath string, switcher ModelSwitcher) (*Manager, error) {
 	m := &Manager{
-		channels: make(map[string]Channel),
-		bus:      messageBus,
-		config:   cfg,
+		channels:      make(map[string]Channel),
+		bus:           messageBus,
+		config:        cfg,
+		configPath:    configPath,
+		modelSwitcher: switcher,
 	}
 
 	if err := m.initChannels(); err != nil {
@@ -48,7 +52,7 @@ func (m *Manager) initChannels() error {
 
 	if m.config.Channels.Telegram.Enabled && m.config.Channels.Telegram.Token != "" {
 		logger.DebugC("channels", "Attempting to initialize Telegram channel")
-		telegram, err := NewTelegramChannel(m.config, m.bus)
+		telegram, err := NewTelegramChannel(m.config, m.bus, m.configPath, m.modelSwitcher)
 		if err != nil {
 			logger.ErrorCF("channels", "Failed to initialize Telegram channel", map[string]any{
 				"error": err.Error(),

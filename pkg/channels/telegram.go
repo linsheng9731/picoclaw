@@ -38,13 +38,15 @@ var (
 
 type TelegramChannel struct {
 	*BaseChannel
-	bot          *telego.Bot
-	commands     TelegramCommander
-	config       *config.Config
-	chatIDs      map[string]int64
-	transcriber  *voice.GroqTranscriber
-	placeholders sync.Map // chatID -> messageID
-	stopThinking sync.Map // chatID -> thinkingCancel
+	bot           *telego.Bot
+	commands      TelegramCommander
+	config        *config.Config
+	configPath    string
+	chatIDs       map[string]int64
+	transcriber   voice.Transcriber
+	placeholders  sync.Map // chatID -> messageID
+	stopThinking  sync.Map // chatID -> thinkingCancel
+	modelSwitcher ModelSwitcher
 }
 
 type thinkingCancel struct {
@@ -57,7 +59,7 @@ func (c *thinkingCancel) Cancel() {
 	}
 }
 
-func NewTelegramChannel(cfg *config.Config, bus *bus.MessageBus) (*TelegramChannel, error) {
+func NewTelegramChannel(cfg *config.Config, bus *bus.MessageBus, configPath string, switcher ModelSwitcher) (*TelegramChannel, error) {
 	var opts []telego.BotOption
 	telegramCfg := cfg.Channels.Telegram
 
@@ -88,18 +90,20 @@ func NewTelegramChannel(cfg *config.Config, bus *bus.MessageBus) (*TelegramChann
 	base := NewBaseChannel("telegram", telegramCfg, bus, telegramCfg.AllowFrom)
 
 	return &TelegramChannel{
-		BaseChannel:  base,
-		commands:     NewTelegramCommands(bot, cfg),
-		bot:          bot,
-		config:       cfg,
-		chatIDs:      make(map[string]int64),
-		transcriber:  nil,
-		placeholders: sync.Map{},
-		stopThinking: sync.Map{},
+		BaseChannel:   base,
+		commands:      NewTelegramCommands(bot, cfg, configPath, switcher),
+		bot:           bot,
+		config:        cfg,
+		configPath:    configPath,
+		chatIDs:       make(map[string]int64),
+		transcriber:   nil,
+		placeholders:  sync.Map{},
+		stopThinking:  sync.Map{},
+		modelSwitcher: switcher,
 	}, nil
 }
 
-func (c *TelegramChannel) SetTranscriber(transcriber *voice.GroqTranscriber) {
+func (c *TelegramChannel) SetTranscriber(transcriber voice.Transcriber) {
 	c.transcriber = transcriber
 }
 
@@ -133,6 +137,10 @@ func (c *TelegramChannel) Start(ctx context.Context) error {
 	bh.HandleMessage(func(ctx *th.Context, message telego.Message) error {
 		return c.commands.List(ctx, message)
 	}, th.CommandEqual("list"))
+
+	bh.HandleMessage(func(ctx *th.Context, message telego.Message) error {
+		return c.commands.Switch(ctx, message)
+	}, th.CommandEqual("switch"))
 
 	bh.HandleMessage(func(ctx *th.Context, message telego.Message) error {
 		return c.handleMessage(ctx, &message)
@@ -223,7 +231,7 @@ func (c *TelegramChannel) handleMessage(ctx context.Context, message *telego.Mes
 
 	// check allowlist to avoid downloading attachments for rejected users
 	if !c.IsAllowed(senderID) {
-		logger.DebugCF("telegram", "Message rejected by allowlist", map[string]any{
+		logger.InfoCF("telegram", "Message rejected by allowlist", map[string]any{
 			"user_id": senderID,
 		})
 		return nil
@@ -231,6 +239,20 @@ func (c *TelegramChannel) handleMessage(ctx context.Context, message *telego.Mes
 
 	chatID := message.Chat.ID
 	c.chatIDs[senderID] = chatID
+
+	// DEBUG: Log message details
+	logger.InfoCF("telegram", "DEBUG: Message received", map[string]any{
+		"sender_id": senderID,
+		"chat_id": chatID,
+		"chat_type": message.Chat.Type,
+		"message_id": message.MessageID,
+		"text": message.Text,
+		"caption": message.Caption,
+		"has_photo": len(message.Photo) > 0,
+		"has_voice": message.Voice != nil,
+		"has_audio": message.Audio != nil,
+		"has_document": message.Document != nil,
+	})
 
 	content := ""
 	mediaPaths := []string{}
@@ -249,6 +271,16 @@ func (c *TelegramChannel) handleMessage(ctx context.Context, message *telego.Mes
 	}()
 
 	if message.Text != "" {
+		// In groups, only process messages that mention the bot
+		if message.Chat.Type != "private" && c.bot.Username() != "" {
+			mention := "@" + c.bot.Username()
+			if !strings.Contains(message.Text, mention) {
+				// Skip messages that don't mention the bot in groups
+				return nil
+			}
+			message.Text = strings.ReplaceAll(message.Text, mention, "")
+			message.Text = strings.TrimSpace(message.Text)
+		}
 		content += message.Text
 	}
 
@@ -279,8 +311,9 @@ func (c *TelegramChannel) handleMessage(ctx context.Context, message *telego.Mes
 			mediaPaths = append(mediaPaths, voicePath)
 
 			var transcribedText string
+			transcriptionSuccess := false
 			if c.transcriber != nil && c.transcriber.IsAvailable() {
-				transcriberCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+				transcriberCtx, cancel := context.WithTimeout(ctx, 120*time.Second)
 				defer cancel()
 
 				result, err := c.transcriber.Transcribe(transcriberCtx, voicePath)
@@ -290,8 +323,17 @@ func (c *TelegramChannel) handleMessage(ctx context.Context, message *telego.Mes
 						"path":  voicePath,
 					})
 					transcribedText = "[voice (transcription failed)]"
+					// Keep the file for debugging - remove from localFiles
+					for i, f := range localFiles {
+						if f == voicePath {
+							localFiles = append(localFiles[:i], localFiles[i+1:]...)
+							break
+						}
+					}
+					logger.InfoCF("telegram", "Kept failed audio file for debugging", map[string]any{"path": voicePath})
 				} else {
 					transcribedText = fmt.Sprintf("[voice transcription: %s]", result.Text)
+					transcriptionSuccess = true
 					logger.InfoCF("telegram", "Voice transcribed successfully", map[string]any{
 						"text": result.Text,
 					})
@@ -299,6 +341,8 @@ func (c *TelegramChannel) handleMessage(ctx context.Context, message *telego.Mes
 			} else {
 				transcribedText = "[voice]"
 			}
+
+			_ = transcriptionSuccess // suppress unused variable warning
 
 			if content != "" {
 				content += "\n"
@@ -336,9 +380,11 @@ func (c *TelegramChannel) handleMessage(ctx context.Context, message *telego.Mes
 	}
 
 	logger.DebugCF("telegram", "Received message", map[string]any{
-		"sender_id": senderID,
-		"chat_id":   fmt.Sprintf("%d", chatID),
-		"preview":   utils.Truncate(content, 50),
+		"sender_id":   senderID,
+		"chat_id":     fmt.Sprintf("%d", chatID),
+		"chat_type":   message.Chat.Type,
+		"preview":     utils.Truncate(content, 50),
+		"bot_username": c.bot.Username(),
 	})
 
 	// Thinking indicator

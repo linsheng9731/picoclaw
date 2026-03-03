@@ -44,3 +44,16 @@ tasks/
 
 # Added by goreleaser init:
 dist/
+
+# AI Assistant Tools
+.claude/
+.claude-flow/
+.mcp.json
+.swarm/
+
+# Misc
+*.log
+tmp/
+temp/
+CLAUDE.md
+AGENTS.md

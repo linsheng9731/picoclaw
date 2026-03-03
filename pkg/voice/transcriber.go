@@ -16,16 +16,23 @@ import (
 	"github.com/sipeed/picoclaw/pkg/utils"
 )
 
-type GroqTranscriber struct {
-	apiKey     string
-	apiBase    string
-	httpClient *http.Client
+// Transcriber is the interface for voice transcription services
+type Transcriber interface {
+	Transcribe(ctx context.Context, audioFilePath string) (*TranscriptionResponse, error)
+	IsAvailable() bool
 }
 
 type TranscriptionResponse struct {
 	Text     string  `json:"text"`
 	Language string  `json:"language,omitempty"`
 	Duration float64 `json:"duration,omitempty"`
+}
+
+// GroqTranscriber implements Transcriber using Groq's Whisper API
+type GroqTranscriber struct {
+	apiKey     string
+	apiBase    string
+	httpClient *http.Client
 }
 
 func NewGroqTranscriber(apiKey string) *GroqTranscriber {

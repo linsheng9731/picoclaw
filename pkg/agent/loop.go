@@ -216,6 +216,45 @@ func (al *AgentLoop) SetChannelManager(cm *channels.Manager) {
 	al.channelManager = cm
 }
 
+// SwitchModel creates a new provider and updates all agent instances.
+// This enables hot-reloading of model changes without restarting the gateway.
+func (al *AgentLoop) SwitchModel(modelName string) error {
+	// Update config with new model name
+	al.cfg.Agents.Defaults.ModelName = modelName
+	al.cfg.Agents.Defaults.Model = "" // Clear deprecated field
+
+	// Create new provider with updated config
+	newProvider, modelID, err := providers.CreateProvider(al.cfg)
+	if err != nil {
+		return fmt.Errorf("failed to create provider for model %s: %w", modelName, err)
+	}
+
+	// Use the resolved model ID
+	if modelID != "" {
+		al.cfg.Agents.Defaults.ModelName = modelID
+	}
+
+	// Update all agents in registry with new provider and model
+	resolvedModel := al.cfg.Agents.Defaults.GetModelName()
+	for _, agentID := range al.registry.ListAgentIDs() {
+		if agent, ok := al.registry.GetAgent(agentID); ok {
+			agent.Provider = newProvider
+			// Update model string for the main/default agent
+			if agent.ID == "main" {
+				agent.Model = resolvedModel
+			}
+		}
+	}
+
+	logger.InfoCF("agent", "Hot-reloaded model",
+		map[string]any{
+			"model_name": modelName,
+			"model_id":   modelID,
+		})
+
+	return nil
+}
+
 // RecordLastChannel records the last active channel for this workspace.
 // This uses the atomic state save mechanism to prevent data loss on crash.
 func (al *AgentLoop) RecordLastChannel(channel string) error {
@@ -596,16 +635,30 @@ func (al *AgentLoop) runLLMIteration(
 			return "", iteration, fmt.Errorf("LLM call failed after retries: %w", err)
 		}
 
-		// Check if no tool calls - we're done
+		// Check if no tool calls - try to parse file blocks from text
 		if len(response.ToolCalls) == 0 {
-			finalContent = response.Content
-			logger.InfoCF("agent", "LLM response without tool calls (direct answer)",
-				map[string]any{
-					"agent_id":      agent.ID,
-					"iteration":     iteration,
-					"content_chars": len(finalContent),
-				})
-			break
+			// Try to extract file blocks from plain text (for LLMs without function calling)
+			fileBlocks := ParseFileBlocks(response.Content)
+			if len(fileBlocks) > 0 {
+				// Convert parsed file blocks to synthetic tool calls
+				response.ToolCalls = ConvertFileBlocksToToolCalls(fileBlocks)
+				logger.InfoCF("agent", "Parsed file blocks from text response",
+					map[string]any{
+						"agent_id":     agent.ID,
+						"iteration":    iteration,
+						"files_count":  len(fileBlocks),
+						"tool_calls":   len(response.ToolCalls),
+					})
+			} else {
+				finalContent = response.Content
+				logger.InfoCF("agent", "LLM response without tool calls (direct answer)",
+					map[string]any{
+						"agent_id":      agent.ID,
+						"iteration":     iteration,
+						"content_chars": len(finalContent),
+					})
+				break
+			}
 		}
 
 		normalizedToolCalls := make([]providers.ToolCall, 0, len(response.ToolCalls))

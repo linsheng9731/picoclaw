@@ -475,6 +475,16 @@ type ToolsConfig struct {
 	Cron   CronToolsConfig   `json:"cron"`
 	Exec   ExecConfig        `json:"exec"`
 	Skills SkillsToolsConfig `json:"skills"`
+	Voice  VoiceToolsConfig  `json:"voice"`
+}
+
+type VoiceToolsConfig struct {
+	Provider string `json:"provider" env:"PICOCLAW_TOOLS_VOICE_PROVIDER"` // "groq" or "deepgram"
+	// Groq settings (uses Providers.Groq.APIKey or model_list with groq/ prefix)
+	// Deepgram settings
+	DeepgramAPIKey string `json:"deepgram_api_key" env:"PICOCLAW_TOOLS_VOICE_DEEPGRAM_API_KEY"`
+	DeepgramModel  string `json:"deepgram_model"  env:"PICOCLAW_TOOLS_VOICE_DEEPGRAM_MODEL"`  // default: "nova-3"
+	DeepgramLang   string `json:"deepgram_lang"   env:"PICOCLAW_TOOLS_VOICE_DEEPGRAM_LANG"`   // default: "en"
 }
 
 type SkillsToolsConfig struct {

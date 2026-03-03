@@ -15,17 +15,27 @@ type TelegramCommander interface {
 	Start(ctx context.Context, message telego.Message) error
 	Show(ctx context.Context, message telego.Message) error
 	List(ctx context.Context, message telego.Message) error
+	Switch(ctx context.Context, message telego.Message) error
+}
+
+// ModelSwitcher defines the interface for hot-reloading models.
+type ModelSwitcher interface {
+	SwitchModel(modelName string) error
 }
 
 type cmd struct {
-	bot    *telego.Bot
-	config *config.Config
+	bot          *telego.Bot
+	config       *config.Config
+	configPath   string
+	modelSwitcher ModelSwitcher
 }
 
-func NewTelegramCommands(bot *telego.Bot, cfg *config.Config) TelegramCommander {
+func NewTelegramCommands(bot *telego.Bot, cfg *config.Config, configPath string, switcher ModelSwitcher) TelegramCommander {
 	return &cmd{
-		bot:    bot,
-		config: cfg,
+		bot:          bot,
+		config:       cfg,
+		configPath:   configPath,
+		modelSwitcher: switcher,
 	}
 }
 
@@ -42,6 +52,7 @@ func (c *cmd) Help(ctx context.Context, message telego.Message) error {
 /help - Show this help message
 /show [model|channel] - Show current configuration
 /list [models|channels] - List available options
+/switch <model_name> - Switch to a different model
 	`
 	_, err := c.bot.SendMessage(ctx, &telego.SendMessageParams{
 		ChatID: telego.ChatID{ID: message.Chat.ID},
@@ -115,12 +126,24 @@ func (c *cmd) List(ctx context.Context, message telego.Message) error {
 	var response string
 	switch args {
 	case "models":
-		provider := c.config.Agents.Defaults.Provider
-		if provider == "" {
-			provider = "configured default"
+		currentModel := c.config.Agents.Defaults.GetModelName()
+		var modelNames []string
+		seen := make(map[string]bool)
+		for _, m := range c.config.ModelList {
+			if !seen[m.ModelName] {
+				seen[m.ModelName] = true
+				marker := ""
+				if m.ModelName == currentModel {
+					marker = " ✓"
+				}
+				modelNames = append(modelNames, fmt.Sprintf("• %s%s", m.ModelName, marker))
+			}
 		}
-		response = fmt.Sprintf("Configured Model: %s\nProvider: %s\n\nTo change models, update config.yaml",
-			c.config.Agents.Defaults.GetModelName(), provider)
+		if len(modelNames) == 0 {
+			response = "No models configured in model_list"
+		} else {
+			response = fmt.Sprintf("Available Models:\n%s\n\nCurrent: %s", strings.Join(modelNames, "\n"), currentModel)
+		}
 
 	case "channels":
 		var enabled []string
@@ -148,6 +171,89 @@ func (c *cmd) List(ctx context.Context, message telego.Message) error {
 	_, err := c.bot.SendMessage(ctx, &telego.SendMessageParams{
 		ChatID: telego.ChatID{ID: message.Chat.ID},
 		Text:   response,
+		ReplyParameters: &telego.ReplyParameters{
+			MessageID: message.MessageID,
+		},
+	})
+	return err
+}
+
+func (c *cmd) Switch(ctx context.Context, message telego.Message) error {
+	args := commandArgs(message.Text)
+	if args == "" {
+		_, err := c.bot.SendMessage(ctx, &telego.SendMessageParams{
+			ChatID: telego.ChatID{ID: message.Chat.ID},
+			Text:   "Usage: /switch <model_name>\nUse /list models to see available models.",
+			ReplyParameters: &telego.ReplyParameters{
+				MessageID: message.MessageID,
+			},
+		})
+		return err
+	}
+
+	modelName := strings.TrimSpace(args)
+
+	// Check if model exists in model_list
+	found := false
+	for _, m := range c.config.ModelList {
+		if m.ModelName == modelName {
+			found = true
+			break
+		}
+	}
+
+	if !found {
+		_, err := c.bot.SendMessage(ctx, &telego.SendMessageParams{
+			ChatID: telego.ChatID{ID: message.Chat.ID},
+			Text:   fmt.Sprintf("Model '%s' not found. Use /list models to see available models.", modelName),
+			ReplyParameters: &telego.ReplyParameters{
+				MessageID: message.MessageID,
+			},
+		})
+		return err
+	}
+
+	// Update config
+	c.config.Agents.Defaults.ModelName = modelName
+	c.config.Agents.Defaults.Model = "" // Clear deprecated field
+
+	// Save config
+	if err := config.SaveConfig(c.configPath, c.config); err != nil {
+		_, sendErr := c.bot.SendMessage(ctx, &telego.SendMessageParams{
+			ChatID: telego.ChatID{ID: message.Chat.ID},
+			Text:   fmt.Sprintf("Failed to save config: %v", err),
+			ReplyParameters: &telego.ReplyParameters{
+				MessageID: message.MessageID,
+			},
+		})
+		return sendErr
+	}
+
+	// Hot-reload the model if switcher is available
+	if c.modelSwitcher != nil {
+		if err := c.modelSwitcher.SwitchModel(modelName); err != nil {
+			_, sendErr := c.bot.SendMessage(ctx, &telego.SendMessageParams{
+				ChatID: telego.ChatID{ID: message.Chat.ID},
+				Text:   fmt.Sprintf("Config saved but hot-reload failed: %v\nRestart gateway to apply changes.", err),
+				ReplyParameters: &telego.ReplyParameters{
+					MessageID: message.MessageID,
+				},
+			})
+			return sendErr
+		}
+		_, err := c.bot.SendMessage(ctx, &telego.SendMessageParams{
+			ChatID: telego.ChatID{ID: message.Chat.ID},
+			Text:   fmt.Sprintf("✓ Switched to model: %s (hot-reloaded)", modelName),
+			ReplyParameters: &telego.ReplyParameters{
+				MessageID: message.MessageID,
+			},
+		})
+		return err
+	}
+
+	_, err := c.bot.SendMessage(ctx, &telego.SendMessageParams{
+		ChatID: telego.ChatID{ID: message.Chat.ID},
+		Text:   fmt.Sprintf("✓ Switched to model: %s\nRestart gateway to apply changes.", modelName),
 		ReplyParameters: &telego.ReplyParameters{
 			MessageID: message.MessageID,
 		},
