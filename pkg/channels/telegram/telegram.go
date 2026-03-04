@@ -144,6 +144,15 @@ func (c *TelegramChannel) Start(ctx context.Context) error {
 	bh.HandleMessage(func(ctx *th.Context, message telego.Message) error {
 		return c.commands.Switch(ctx, message)
 	}, th.CommandEqual("switch"))
+	bh.HandleMessage(func(ctx *th.Context, message telego.Message) error {
+		return c.commands.Think(ctx, message)
+	}, th.CommandEqual("think"))
+	bh.HandleMessage(func(ctx *th.Context, message telego.Message) error {
+		return c.commands.Think(ctx, message)
+	}, th.CommandEqual("thinking"))
+	bh.HandleMessage(func(ctx *th.Context, message telego.Message) error {
+		return c.commands.Think(ctx, message)
+	}, th.CommandEqual("t"))
 
 	bh.HandleMessage(func(ctx *th.Context, message telego.Message) error {
 		return c.handleMessage(ctx, &message)
@@ -210,6 +219,10 @@ func (c *TelegramChannel) initBotCommands(ctx context.Context) error {
 		{
 			Command:     "switch",
 			Description: "Switch to a different model",
+		},
+		{
+			Command:     "think",
+			Description: "Set thinking level for current session",
 		},
 	}
 

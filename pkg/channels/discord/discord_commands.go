@@ -17,6 +17,7 @@ type DiscordCommander interface {
 	Show(ctx context.Context, s *discordgo.Session, m *discordgo.MessageCreate) error
 	List(ctx context.Context, s *discordgo.Session, m *discordgo.MessageCreate) error
 	Switch(ctx context.Context, s *discordgo.Session, m *discordgo.MessageCreate) error
+	Think(ctx context.Context, s *discordgo.Session, m *discordgo.MessageCreate) error
 }
 
 type cmd struct {
@@ -55,13 +56,15 @@ func (c *cmd) Help(ctx context.Context, s *discordgo.Session, m *discordgo.Messa
 
 /start - Start the bot
 /help - Show this help message
-/show [model|channel] - Show current configuration
+/show [model|channel|thinking] - Show current configuration
 /list [models|channels] - List available options
 /switch model <name> - Switch to a different model
+/think <level> - Set thinking level for current session
 
 **Examples:**
 /switch model gpt-4
 /switch model claude-sonnet-4.6
+/think high
 
 Use /list models to see all available models.
 `
@@ -77,7 +80,7 @@ func (c *cmd) Show(ctx context.Context, s *discordgo.Session, m *discordgo.Messa
 	}
 
 	if args == "" {
-		_, err := s.ChannelMessageSend(m.ChannelID, "Usage: /show [model|channel]")
+		_, err := s.ChannelMessageSend(m.ChannelID, "Usage: /show [model|channel|thinking]")
 		return err
 	}
 
@@ -184,6 +187,49 @@ func (c *cmd) Switch(ctx context.Context, s *discordgo.Session, m *discordgo.Mes
 	}
 
 	// The agent will respond via the normal outbound flow; no immediate reply here.
+	return nil
+}
+
+func (c *cmd) Think(ctx context.Context, s *discordgo.Session, m *discordgo.MessageCreate) error {
+	cmdName, args := parseCommand(m.Content)
+	if cmdName != "think" && cmdName != "thinking" && cmdName != "t" {
+		return fmt.Errorf("invalid command format")
+	}
+
+	if c.bus == nil {
+		_, err := c.session.ChannelMessageSend(m.ChannelID, "❌ Internal error: message bus not initialized")
+		return err
+	}
+
+	normalized := "/think"
+	if args != "" {
+		normalized += " " + args
+	}
+
+	inbound := bus.InboundMessage{
+		Channel:  "discord",
+		SenderID: m.Author.ID,
+		Sender: bus.SenderInfo{
+			Platform:    "discord",
+			PlatformID:  m.Author.ID,
+			CanonicalID: identity.BuildCanonicalID("discord", m.Author.ID),
+			Username:    m.Author.Username,
+			DisplayName: m.Author.Username,
+		},
+		ChatID:    m.ChannelID,
+		Content:   normalized,
+		MessageID: m.ID,
+		Metadata: map[string]string{
+			"guild_id":   m.GuildID,
+			"channel_id": m.ChannelID,
+		},
+	}
+
+	if err := c.bus.PublishInbound(ctx, inbound); err != nil {
+		_, sendErr := c.session.ChannelMessageSend(m.ChannelID, fmt.Sprintf("❌ Failed to set thinking level: %v", err))
+		return sendErr
+	}
+
 	return nil
 }
 

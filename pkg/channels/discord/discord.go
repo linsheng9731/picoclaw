@@ -568,6 +568,8 @@ func (c *DiscordChannel) handleSlashCommand(ctx context.Context, s *discordgo.Se
 		return c.commands.List(ctx, s, m)
 	case "switch":
 		return c.commands.Switch(ctx, s, m)
+	case "think", "thinking", "t":
+		return c.commands.Think(ctx, s, m)
 	default:
 		// Unknown command - let it fall through to normal message handling
 		return nil

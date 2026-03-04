@@ -12,7 +12,7 @@ import (
 	"github.com/sipeed/picoclaw/pkg/identity"
 )
 
-func TestIsTelegramSwitchAllowed(t *testing.T) {
+func TestIsTelegramCommandAllowed(t *testing.T) {
 	sender := bus.SenderInfo{
 		Platform:    "telegram",
 		PlatformID:  "123",
@@ -49,9 +49,9 @@ func TestIsTelegramSwitchAllowed(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := isTelegramSwitchAllowed(tt.allowFrom, sender)
+			got := isTelegramCommandAllowed(tt.allowFrom, sender)
 			if got != tt.want {
-				t.Fatalf("isTelegramSwitchAllowed() = %v, want %v", got, tt.want)
+				t.Fatalf("isTelegramCommandAllowed() = %v, want %v", got, tt.want)
 			}
 		})
 	}
@@ -111,5 +111,50 @@ func TestSwitchPublishesNormalizedCommand(t *testing.T) {
 	}
 	if got.Channel != "telegram" || got.ChatID != "42" {
 		t.Fatalf("unexpected inbound routing: channel=%q chat=%q", got.Channel, got.ChatID)
+	}
+}
+
+func TestThinkPublishesNormalizedCommand(t *testing.T) {
+	msgBus := bus.NewMessageBus()
+	t.Cleanup(msgBus.Close)
+
+	cfg := &config.Config{
+		Channels: config.ChannelsConfig{
+			Telegram: config.TelegramConfig{
+				AllowFrom: config.FlexibleStringSlice{},
+			},
+		},
+	}
+
+	commander := &cmd{
+		config: cfg,
+		bus:    msgBus,
+	}
+
+	message := telego.Message{
+		MessageID: 8,
+		Text:      "/thinking medium",
+		Chat: telego.Chat{
+			ID: 42,
+		},
+		From: &telego.User{
+			ID:        123,
+			Username:  "alice",
+			FirstName: "Alice",
+		},
+	}
+
+	if err := commander.Think(context.Background(), message); err != nil {
+		t.Fatalf("Think() error = %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	got, ok := msgBus.ConsumeInbound(ctx)
+	if !ok {
+		t.Fatal("expected inbound think command")
+	}
+	if got.Content != "/think medium" {
+		t.Fatalf("inbound content = %q, want %q", got.Content, "/think medium")
 	}
 }
