@@ -10,6 +10,7 @@ import (
 	"github.com/openai/openai-go/v3"
 	"github.com/openai/openai-go/v3/option"
 	"github.com/openai/openai-go/v3/responses"
+	"github.com/openai/openai-go/v3/shared"
 
 	"github.com/sipeed/picoclaw/pkg/auth"
 	"github.com/sipeed/picoclaw/pkg/logger"
@@ -299,6 +300,11 @@ func buildCodexParams(
 	// See: https://platform.openai.com/docs/guides/prompt-caching
 	if cacheKey, ok := options["prompt_cache_key"].(string); ok && cacheKey != "" {
 		params.PromptCacheKey = openai.Opt(cacheKey)
+	}
+	if effort, ok := options["reasoning_effort"].(string); ok && effort != "" {
+		params.Reasoning = shared.ReasoningParam{
+			Effort: shared.ReasoningEffort(effort),
+		}
 	}
 
 	if len(tools) > 0 || enableWebSearch {

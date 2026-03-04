@@ -14,7 +14,8 @@ import (
 type Session struct {
 	Key      string              `json:"key"`
 	Messages []providers.Message `json:"messages"`
-	Summary  string              `json:"summary,omitempty"`
+	Summary       string              `json:"summary,omitempty"`
+	ThinkingLevel string              `json:"thinking_level,omitempty"`
 	Created  time.Time           `json:"created"`
 	Updated  time.Time           `json:"updated"`
 }
@@ -122,6 +123,35 @@ func (sm *SessionManager) SetSummary(key string, summary string) {
 	}
 }
 
+func (sm *SessionManager) GetThinkingLevel(key string) string {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+
+	session, ok := sm.sessions[key]
+	if !ok {
+		return ""
+	}
+	return session.ThinkingLevel
+}
+
+func (sm *SessionManager) SetThinkingLevel(key, level string) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+
+	session, ok := sm.sessions[key]
+	if !ok {
+		session = &Session{
+			Key:      key,
+			Messages: []providers.Message{},
+			Created:  time.Now(),
+		}
+		sm.sessions[key] = session
+	}
+
+	session.ThinkingLevel = level
+	session.Updated = time.Now()
+}
+
 func (sm *SessionManager) TruncateHistory(key string, keepLast int) {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
@@ -180,6 +210,7 @@ func (sm *SessionManager) Save(key string) error {
 	snapshot := Session{
 		Key:     stored.Key,
 		Summary: stored.Summary,
+		ThinkingLevel: stored.ThinkingLevel,
 		Created: stored.Created,
 		Updated: stored.Updated,
 	}

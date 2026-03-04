@@ -149,6 +149,9 @@ func (p *Provider) Chat(
 			requestBody["temperature"] = temperature
 		}
 	}
+	if effort, ok := options["reasoning_effort"].(string); ok && effort != "" {
+		requestBody["reasoning_effort"] = effort
+	}
 
 	// Prompt caching: pass a stable cache key so OpenAI can bucket requests
 	// with the same key and reuse prefix KV cache across calls.

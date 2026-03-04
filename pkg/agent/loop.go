@@ -458,11 +458,6 @@ func (al *AgentLoop) processMessage(ctx context.Context, msg bus.InboundMessage)
 		return al.processSystemMessage(ctx, msg)
 	}
 
-	// Check for commands
-	if response, handled := al.handleCommand(ctx, msg); handled {
-		return response, nil
-	}
-
 	// Route to determine agent and session key
 	route := al.registry.ResolveRoute(routing.RouteInput{
 		Channel:    msg.Channel,
@@ -492,6 +487,11 @@ func (al *AgentLoop) processMessage(ctx context.Context, msg bus.InboundMessage)
 	sessionKey := route.SessionKey
 	if msg.SessionKey != "" && strings.HasPrefix(msg.SessionKey, "agent:") {
 		sessionKey = msg.SessionKey
+	}
+
+	// Handle commands after routing so command state can be session-scoped.
+	if response, handled := al.handleCommand(ctx, msg, agent, sessionKey); handled {
+		return response, nil
 	}
 
 	logger.InfoCF("agent", "Routed message",
@@ -735,6 +735,15 @@ func (al *AgentLoop) runLLMIteration(
 ) (string, int, error) {
 	iteration := 0
 	var finalContent string
+	thinkingLevel := resolveThinkingLevel(al.cfg, agent, opts.SessionKey)
+	requestOptions := map[string]any{
+		"max_tokens":       agent.MaxTokens,
+		"temperature":      agent.Temperature,
+		"prompt_cache_key": agent.ID,
+	}
+	if effort := reasoningEffortForLevel(thinkingLevel); effort != "" {
+		requestOptions["reasoning_effort"] = effort
+	}
 
 	for iteration < agent.MaxIterations {
 		iteration++
@@ -759,6 +768,7 @@ func (al *AgentLoop) runLLMIteration(
 				"tools_count":       len(providerToolDefs),
 				"max_tokens":        agent.MaxTokens,
 				"temperature":       agent.Temperature,
+				"thinking_level":    thinkingLevel,
 				"system_prompt_len": len(messages[0].Content),
 			})
 
@@ -785,11 +795,7 @@ func (al *AgentLoop) runLLMIteration(
 							messages,
 							providerToolDefs,
 							model,
-							map[string]any{
-								"max_tokens":       agent.MaxTokens,
-								"temperature":      agent.Temperature,
-								"prompt_cache_key": agent.ID,
-							},
+							requestOptions,
 						)
 					},
 				)
@@ -806,15 +812,13 @@ func (al *AgentLoop) runLLMIteration(
 				}
 				return fbResult.Response, nil
 			}
-			return agent.Provider.Chat(ctx, messages, providerToolDefs, agent.Model, map[string]any{
-				"max_tokens":       agent.MaxTokens,
-				"temperature":      agent.Temperature,
-				"prompt_cache_key": agent.ID,
-			})
+			return agent.Provider.Chat(ctx, messages, providerToolDefs, agent.Model, requestOptions)
 		}
 
 		// Retry loop for context/token errors
 		maxRetries := 2
+		maxThinkingDowngrades := len(thinkingDowngradeOrder)
+		thinkingDowngrades := 0
 		for retry := 0; retry <= maxRetries; retry++ {
 			response, err = callLLM()
 			if err == nil {
@@ -840,6 +844,40 @@ func (al *AgentLoop) runLLMIteration(
 				strings.Contains(errMsg, "invalidparameter") ||
 				strings.Contains(errMsg, "prompt is too long") ||
 				strings.Contains(errMsg, "request too large"))
+
+			if isThinkingUnsupportedError(errMsg) && thinkingLevel != "" && thinkingDowngrades < maxThinkingDowngrades {
+				supported := parseSupportedThinkingLevels(errMsg)
+				if nextLevel, ok := nextDowngradedThinkingLevel(thinkingLevel, supported); ok && nextLevel != thinkingLevel {
+					prevLevel := thinkingLevel
+					thinkingLevel = nextLevel
+					if effort := reasoningEffortForLevel(thinkingLevel); effort != "" {
+						requestOptions["reasoning_effort"] = effort
+					} else {
+						delete(requestOptions, "reasoning_effort")
+					}
+					thinkingDowngrades++
+					logger.WarnCF("agent", "Thinking level downgraded after provider rejection", map[string]any{
+						"agent_id":       agent.ID,
+						"session_key":    opts.SessionKey,
+						"from":           prevLevel,
+						"to":             thinkingLevel,
+						"supported":      supported,
+						"provider_error": err.Error(),
+					})
+					continue
+				}
+				if strings.Contains(errMsg, "not supported") && thinkingLevel != thinkingOff {
+					thinkingLevel = thinkingOff
+					delete(requestOptions, "reasoning_effort")
+					thinkingDowngrades++
+					logger.WarnCF("agent", "Thinking level forced to off after provider rejection", map[string]any{
+						"agent_id":       agent.ID,
+						"session_key":    opts.SessionKey,
+						"provider_error": err.Error(),
+					})
+					continue
+				}
+			}
 
 			if isTimeoutError && retry < maxRetries {
 				backoff := time.Duration(retry+1) * 5 * time.Second
@@ -1390,7 +1428,12 @@ func (al *AgentLoop) estimateTokens(messages []providers.Message) int {
 	return totalChars * 2 / 5
 }
 
-func (al *AgentLoop) handleCommand(ctx context.Context, msg bus.InboundMessage) (string, bool) {
+func (al *AgentLoop) handleCommand(
+	ctx context.Context,
+	msg bus.InboundMessage,
+	agent *AgentInstance,
+	sessionKey string,
+) (string, bool) {
 	content := strings.TrimSpace(msg.Content)
 	if !strings.HasPrefix(content, "/") {
 		return "", false
@@ -1407,20 +1450,25 @@ func (al *AgentLoop) handleCommand(ctx context.Context, msg bus.InboundMessage) 
 	switch cmd {
 	case "/show":
 		if len(args) < 1 {
-			return "Usage: /show [model|channel|agents]", true
+			return "Usage: /show [model|channel|agents|thinking]", true
 		}
 		switch args[0] {
 		case "model":
-			defaultAgent := al.registry.GetDefaultAgent()
-			if defaultAgent == nil {
+			if agent == nil {
 				return "No default agent configured", true
 			}
-			return fmt.Sprintf("Current model: %s", defaultAgent.Model), true
+			return fmt.Sprintf("Current model: %s", agent.Model), true
 		case "channel":
 			return fmt.Sprintf("Current channel: %s", msg.Channel), true
 		case "agents":
 			agentIDs := al.registry.ListAgentIDs()
 			return fmt.Sprintf("Registered agents: %s", strings.Join(agentIDs, ", ")), true
+		case "thinking":
+			level := resolveThinkingLevel(al.cfg, agent, sessionKey)
+			if level == "" {
+				level = thinkingAdaptive
+			}
+			return fmt.Sprintf("Current thinking level: %s", level), true
 		default:
 			return fmt.Sprintf("Unknown show target: %s", args[0]), true
 		}
@@ -1477,6 +1525,30 @@ func (al *AgentLoop) handleCommand(ctx context.Context, msg bus.InboundMessage) 
 		default:
 			return fmt.Sprintf("Unknown switch target: %s", target), true
 		}
+	case "/think", "/thinking", "/t":
+		if agent == nil {
+			return "No agent available for thinking control", true
+		}
+		if len(args) == 0 {
+			level := resolveThinkingLevel(al.cfg, agent, sessionKey)
+			if level == "" {
+				level = thinkingAdaptive
+			}
+			return fmt.Sprintf(
+				"Current thinking level: %s\nAvailable levels: off, minimal, low, medium, high, xhigh, adaptive",
+				level,
+			), true
+		}
+		level, ok := normalizeThinkingLevel(args[0])
+		if !ok {
+			return "Invalid thinking level. Use one of: off, minimal, low, medium, high, xhigh, adaptive", true
+		}
+		if level == thinkingXHigh && !supportsXHigh(agent.Model, al.cfg) {
+			return "xhigh is only supported by GPT-5.2 and Codex model series", true
+		}
+		agent.Sessions.SetThinkingLevel(sessionKey, level)
+		_ = agent.Sessions.Save(sessionKey)
+		return fmt.Sprintf("Thinking level for this session is now set to %s", level), true
 	}
 
 	return "", false
