@@ -18,6 +18,7 @@ type TelegramCommander interface {
 	Show(ctx context.Context, message telego.Message) error
 	List(ctx context.Context, message telego.Message) error
 	Switch(ctx context.Context, message telego.Message) error
+	Think(ctx context.Context, message telego.Message) error
 }
 
 type cmd struct {
@@ -42,7 +43,7 @@ func commandArgs(text string) string {
 	return strings.TrimSpace(parts[1])
 }
 
-func isTelegramSwitchAllowed(allowFrom config.FlexibleStringSlice, sender bus.SenderInfo) bool {
+func isTelegramCommandAllowed(allowFrom config.FlexibleStringSlice, sender bus.SenderInfo) bool {
 	if len(allowFrom) == 0 {
 		return true
 	}
@@ -57,13 +58,15 @@ func isTelegramSwitchAllowed(allowFrom config.FlexibleStringSlice, sender bus.Se
 func (c *cmd) Help(ctx context.Context, message telego.Message) error {
 	msg := `/start - Start the bot
 /help - Show this help message
-/show [model|channel] - Show current configuration
+/show [model|channel|thinking] - Show current configuration
 /list [models|channels] - List available options
 /switch model <name> - Switch to a different model
+/think <level> - Set thinking level for current session
 
 **Examples:**
 /switch model gpt-4
 /switch model claude-sonnet-4.6
+/think medium
 
 Use /list models to see all available models.
 `
@@ -93,7 +96,7 @@ func (c *cmd) Show(ctx context.Context, message telego.Message) error {
 	if args == "" {
 		_, err := c.bot.SendMessage(ctx, &telego.SendMessageParams{
 			ChatID: telego.ChatID{ID: message.Chat.ID},
-			Text:   "Usage: /show [model|channel]",
+			Text:   "Usage: /show [model|channel|thinking]",
 			ReplyParameters: &telego.ReplyParameters{
 				MessageID: message.MessageID,
 			},
@@ -195,7 +198,7 @@ func (c *cmd) Switch(ctx context.Context, message telego.Message) error {
 		Username:    message.From.Username,
 		DisplayName: message.From.FirstName,
 	}
-	if !isTelegramSwitchAllowed(c.config.Channels.Telegram.AllowFrom, sender) {
+	if !isTelegramCommandAllowed(c.config.Channels.Telegram.AllowFrom, sender) {
 		_, err := c.bot.SendMessage(ctx, &telego.SendMessageParams{
 			ChatID: telego.ChatID{ID: message.Chat.ID},
 			Text:   "❌ You are not allowed to use this command.",
@@ -281,6 +284,80 @@ func (c *cmd) Switch(ctx context.Context, message telego.Message) error {
 	}
 
 	// The agent will respond via the normal outbound flow; no immediate reply here.
+	return nil
+}
+
+func (c *cmd) Think(ctx context.Context, message telego.Message) error {
+	if message.From == nil {
+		_, err := c.bot.SendMessage(ctx, &telego.SendMessageParams{
+			ChatID: telego.ChatID{ID: message.Chat.ID},
+			Text:   "❌ Cannot determine sender",
+			ReplyParameters: &telego.ReplyParameters{
+				MessageID: message.MessageID,
+			},
+		})
+		return err
+	}
+
+	platformID := fmt.Sprintf("%d", message.From.ID)
+	sender := bus.SenderInfo{
+		Platform:    "telegram",
+		PlatformID:  platformID,
+		CanonicalID: identity.BuildCanonicalID("telegram", platformID),
+		Username:    message.From.Username,
+		DisplayName: message.From.FirstName,
+	}
+	if !isTelegramCommandAllowed(c.config.Channels.Telegram.AllowFrom, sender) {
+		_, err := c.bot.SendMessage(ctx, &telego.SendMessageParams{
+			ChatID: telego.ChatID{ID: message.Chat.ID},
+			Text:   "❌ You are not allowed to use this command.",
+			ReplyParameters: &telego.ReplyParameters{
+				MessageID: message.MessageID,
+			},
+		})
+		return err
+	}
+
+	if c.bus == nil {
+		_, err := c.bot.SendMessage(ctx, &telego.SendMessageParams{
+			ChatID: telego.ChatID{ID: message.Chat.ID},
+			Text:   "❌ Internal error: message bus not initialized",
+			ReplyParameters: &telego.ReplyParameters{
+				MessageID: message.MessageID,
+			},
+		})
+		return err
+	}
+
+	args := commandArgs(message.Text)
+	normalized := "/think"
+	if args != "" {
+		normalized = "/think " + args
+	}
+
+	inbound := bus.InboundMessage{
+		Channel:   "telegram",
+		SenderID:  platformID,
+		Sender:    sender,
+		ChatID:    fmt.Sprintf("%d", message.Chat.ID),
+		Content:   normalized,
+		MessageID: fmt.Sprintf("%d", message.MessageID),
+		Metadata: map[string]string{
+			"is_group": fmt.Sprintf("%t", message.Chat.Type != "private"),
+		},
+	}
+
+	if err := c.bus.PublishInbound(ctx, inbound); err != nil {
+		_, sendErr := c.bot.SendMessage(ctx, &telego.SendMessageParams{
+			ChatID: telego.ChatID{ID: message.Chat.ID},
+			Text:   fmt.Sprintf("❌ Failed to set thinking level: %v", err),
+			ReplyParameters: &telego.ReplyParameters{
+				MessageID: message.MessageID,
+			},
+		})
+		return sendErr
+	}
+
 	return nil
 }
 

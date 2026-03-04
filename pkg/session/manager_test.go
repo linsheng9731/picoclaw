@@ -72,3 +72,19 @@ func TestSave_RejectsPathTraversal(t *testing.T) {
 		}
 	}
 }
+
+func TestThinkingLevel_PersistsAcrossReload(t *testing.T) {
+	tmpDir := t.TempDir()
+	sm := NewSessionManager(tmpDir)
+
+	key := "discord:abc123"
+	sm.SetThinkingLevel(key, "high")
+	if err := sm.Save(key); err != nil {
+		t.Fatalf("Save(%q) failed: %v", key, err)
+	}
+
+	sm2 := NewSessionManager(tmpDir)
+	if got := sm2.GetThinkingLevel(key); got != "high" {
+		t.Fatalf("GetThinkingLevel() = %q, want %q", got, "high")
+	}
+}
